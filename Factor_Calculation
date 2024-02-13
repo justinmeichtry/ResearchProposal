@@ -1,0 +1,248 @@
+import pandas as pd
+import numpy as np
+
+## TODO: -Filter by Identifier 
+## TODO: -Add Volatility Factor (Implied and Historical and Difference)
+## TODO:
+
+# ======================== LOAD NEW DATAFRAMES ========================
+
+# Load the identifiers_db data
+identifiers_db_file = r'C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\identifiers_db.csv'
+identifiers_db = pd.read_csv(identifiers_db_file)
+identifiers_db.drop_duplicates(subset=['secid'], inplace=True)
+
+# Load the new_permno_secid data
+new_file = r"C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\secid_permno.csv"
+new_permno_secid = pd.read_csv(new_file)
+new_permno_secid.drop_duplicates(subset=['PERMNO'], inplace=True)
+
+# Load Financial Ratios and Stock Prices Data
+financial_ratios = pd.read_csv(r'C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Financial_Ratio\combined_financial_ratio_data.csv')
+stock_prices = pd.read_csv(r'C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Stock_Prices\combined_stock_prices_data.csv')
+
+# Define your parameters
+otm_range = (10, 15)
+months_to_expiry = 1
+
+# Construct the file path dynamically
+monthly_returns_file = rf'C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Monthly_Returns\Monthly_Returns_OTMrange_{otm_range[0]}-{otm_range[1]}_MonthsToExpiry_{months_to_expiry}.xlsx'
+
+# Load Monthly Returns Portfolio and Unique Identifiers
+monthly_returns = pd.read_excel(monthly_returns_file, sheet_name="Monthly Returns")
+unique_identifiers = pd.read_excel(monthly_returns_file, sheet_name="Unique Identifiers")
+
+# ======================== MAP IDENTIFIERS ========================
+
+# Combine new information with the identifiers_db and drop duplicates
+combined_identifiers = pd.concat([identifiers_db[['permno', 'secid']], new_permno_secid[['PERMNO', 'secid']]])
+combined_identifiers.drop_duplicates(subset=['permno'], keep='last', inplace=True)
+
+# Create a mapping dictionary from permno to secid
+permno_to_secid_mapping = dict(zip(combined_identifiers['permno'], combined_identifiers['secid']))
+
+# Map secid to Financial Ratios and Stock Prices data
+financial_ratios['secid'] = financial_ratios['permno'].map(permno_to_secid_mapping)
+
+# Optionally, filter out rows where mapping resulted in NaN (i.e., no matching secid found)
+financial_ratios = financial_ratios.dropna(subset=['secid'])
+
+# ======================== FILTER FINANCIAL RATIO ========================
+
+# Filter financial_ratios and stock_prices based on unique_identifiers
+filtered_financial_ratios = financial_ratios[financial_ratios['secid'].isin(unique_identifiers['secid'])]
+
+# List of columns to keep
+columns_to_keep = [
+    'permno', "public_date",'bm', 'pe_op_basic', 'pe_op_dil', 'pe_exi', 'pe_inc', 'ptb',
+    'roe', 'roa', 'gpm', 'CAPEI', 'rd_sale', 'curr_ratio', 'quick_ratio',
+    'de_ratio', 'intcov', 'intcov_ratio', 'mktcap', "price", "secid"
+    # Add any other columns you want to keep
+]
+
+# Filter the DataFrame
+filtered_financial_ratios = filtered_financial_ratios[columns_to_keep]
+
+# Define the lag (number of periods to shift)
+lag = 1  # Change this to set a different lag
+
+# Shift the price by the specified lag
+filtered_financial_ratios['lagged_price'] = filtered_financial_ratios.groupby('secid')['price'].shift(lag)
+
+# Calculate returns based on the lagged price
+filtered_financial_ratios['return'] = filtered_financial_ratios.groupby('secid')['lagged_price'].pct_change()
+
+def filter_by_identifier(data, identifiers=None, identifier_column='secid'):
+    """
+    Filters the DataFrame based on a list of identifiers. If no identifiers are provided,
+    returns the full dataset.
+
+    :param data: pandas DataFrame, the dataset to filter
+    :param identifiers: pandas Series or None, a Series of identifiers to filter by or None for no filtering
+    :param identifier_column: str, the name of the column containing the identifiers
+    :return: pandas DataFrame, filtered dataset or full dataset if no identifiers are provided
+    """
+    if identifiers is not None and not identifiers.empty:
+        return data[data[identifier_column].isin(identifiers)]
+    else:
+        # No filtering if identifiers Series is None or empty
+        return data
+
+# Example usage:
+# Filtering with identifiers
+filtered_financial_ratios = filter_by_identifier(financial_ratios, unique_identifiers['secid'])
+
+# Using full dataset (no filtering)
+filtered_financial_ratios = filter_by_identifier(financial_ratios)
+
+# ======================== CALCUALTE FUNDAMENTAL FACTORS ========================
+
+## Next to LS also calculate L and S and Beta Neutral Legs of the factors
+# What are the factors?
+# BM: Book to Market
+# ROE: Return on Investment
+# Mtkcap: Small minus Big
+# pe_op_basic: Price to Earnings
+# gpm?
+
+# Assuming 'factors' list is already defined
+factors = ['bm', 'roe', 'mktcap', 'pe_op_basic', 'gpm']  # Adjust the factors based on your dataset
+
+for factor in factors:
+    # Calculate quantiles for the factor
+    filtered_financial_ratios[f'{factor}_quantile'] = filtered_financial_ratios.groupby('public_date')[factor].transform(
+        lambda x: pd.qcut(x, 5, labels=False, duplicates='drop'))
+    
+# Create a new DataFrame to store long/short returns
+long_short_returns_df = pd.DataFrame()
+
+for factor in factors:
+    # Ensure quantile column exists
+    if f'{factor}_quantile' in filtered_financial_ratios.columns:
+        # Calculate long/short return for the factor
+        top_quantile_returns = filtered_financial_ratios[filtered_financial_ratios[f'{factor}_quantile'] == 4].groupby('public_date')['return'].mean()
+        bottom_quantile_returns = filtered_financial_ratios[filtered_financial_ratios[f'{factor}_quantile'] == 0].groupby('public_date')['return'].mean()
+        long_short_return = top_quantile_returns - bottom_quantile_returns
+        long_short_returns_df[f'ls_{factor}'] = long_short_return
+    else:
+        print(f"Quantile column for {factor} not found in DataFrame.")
+        
+def get_identifiers_in_quantiles_by_date(data, factor, date_column):
+    quantile_col = f'{factor}_quantile'
+    grouped = data.groupby([date_column, quantile_col])
+    quantile_identifiers_by_date = {}
+
+    for (date, quantile), group in grouped:
+        identifiers = group['secid'].unique().tolist()
+        if date not in quantile_identifiers_by_date:
+            quantile_identifiers_by_date[date] = {}
+        quantile_identifiers_by_date[date][quantile] = identifiers
+
+    return quantile_identifiers_by_date
+
+for factor in factors:
+    #print(f"Identifiers in each quantile by date for {factor}:")
+    quantile_identifiers_by_date = get_identifiers_in_quantiles_by_date(filtered_financial_ratios, factor, 'public_date')
+    
+    for date, quantiles in quantile_identifiers_by_date.items():
+        #print(f"Date: {date}")
+        for quantile, ids in quantiles.items():
+            print(f"Quantile {quantile}: {ids}")
+        print("\n")
+
+all_data = []
+for factor in factors:
+    quantile_identifiers_by_date = get_identifiers_in_quantiles_by_date(filtered_financial_ratios, factor, 'public_date')
+    for date, quantiles in quantile_identifiers_by_date.items():
+        for quantile, ids in quantiles.items():
+            for secid in ids:
+                all_data.append({'Date': date, 'Factor': factor, 'Quantile': quantile, 'secid': secid})
+
+quantile_df = pd.DataFrame(all_data)
+quantile_df.to_csv(r'C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Factor_Analysis\quantile_identifiers_by_date.csv', index=False)
+
+# Reset index to merge
+long_short_returns_df = long_short_returns_df.reset_index()
+
+# Merge with the original DataFrame
+output_data = pd.merge(filtered_financial_ratios, long_short_returns_df, on='public_date', how='left')
+
+# Selecting relevant columns for output
+output_columns = ['public_date', 'secid'] + [f'ls_{factor}' for factor in factors]
+output_data = output_data[output_columns].drop_duplicates()
+
+output_data.to_csv(r'C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Factor_Analysis\factor_long_short_returns.csv', index=False)
+
+# ======================== CALCUALTE HISTORICAL VOLATILITY FACTOR ========================
+
+# Function to calculate historical volatility
+def calculate_historical_volatility(data, price_column, identifier_column, lookback_period=30):
+    data['daily_return'] = data.groupby(identifier_column)[price_column].pct_change()
+    data['historical_volatility'] = data.groupby(identifier_column)['daily_return'].rolling(lookback_period).std().reset_index(0, drop=True)
+    return data
+
+# Apply historical volatility calculation
+filtered_financial_ratios = calculate_historical_volatility(filtered_financial_ratios, 'price', 'secid', 30)
+
+# Define factors including 'historical_volatility'
+factors = ['bm', 'roe', 'mktcap', 'pe_op_basic', 'gpm', 'historical_volatility']
+
+# Function to calculate long/short returns
+def calculate_long_short_returns(data, factors):
+    long_short_returns_df = pd.DataFrame()
+    for factor in factors:
+        if f'{factor}_quantile' in data.columns:
+            top_quantile_returns = data[data[f'{factor}_quantile'] == 4].groupby('public_date')['return'].mean()
+            bottom_quantile_returns = data[data[f'{factor}_quantile'] == 0].groupby('public_date')['return'].mean()
+            long_short_return = top_quantile_returns - bottom_quantile_returns
+            long_short_returns_df[f'ls_{factor}'] = long_short_return
+        else:
+            print(f"Quantile column for {factor} not found in DataFrame.")
+    return long_short_returns_df
+
+# Calculate quantiles for each factor
+for factor in factors:
+    filtered_financial_ratios[f'{factor}_quantile'] = filtered_financial_ratios.groupby('public_date')[factor].transform(
+        lambda x: pd.qcut(x, 5, labels=False, duplicates='drop'))
+
+# Calculate long/short returns for each factor
+long_short_returns_df = calculate_long_short_returns(filtered_financial_ratios, factors)
+
+# ======================== CALCUALTE IMPLIED VOLATILITY FACTOR ========================
+
+# ======================== CALCUALTE MOMENTUM FACTOR ========================
+
+# Is Momentum Calculated correctly like the other factors with quantiles or not?
+
+# Maybe add a lag to the data? 1 Day or one month
+def calculate_momentum(data, price_column, identifier_column, time_column, momentum_length, num_quantiles=5):
+    """
+    Calculate the momentum factor and assign quantiles based on ranks.
+    ...
+    :return: DataFrame with date, identifier, momentum, momentum rank, quantile.
+    """
+    # Calculate momentum
+    momentum_col_name = f'momentum_{momentum_length}m'
+    data[momentum_col_name] = data.groupby(identifier_column)[price_column].pct_change(periods=momentum_length).shift(-1)
+
+    # Calculate ranks within each date
+    data[f'{momentum_col_name}_rank'] = data.groupby(time_column)[momentum_col_name].rank(ascending=False)
+
+    # Assign quantiles based on ranks
+    quantile_labels = range(num_quantiles)
+    data[f'{momentum_col_name}_quantile'] = data.groupby(time_column)[f'{momentum_col_name}_rank'].transform(
+        lambda x: pd.qcut(x, num_quantiles, labels=quantile_labels))
+
+    # Return necessary columns including the momentum value
+    return data[[time_column, identifier_column, momentum_col_name, f'{momentum_col_name}_rank', f'{momentum_col_name}_quantile']]
+
+# Calculate 12-month momentum with detailed data including momentum values
+momentum_data_12m = calculate_momentum(filtered_financial_ratios, 'price', 'secid', 'public_date', 12)
+
+# Calculate 6-month momentum with detailed data including momentum values
+momentum_data_6m = calculate_momentum(filtered_financial_ratios, 'price', 'secid', 'public_date', 6)
+
+# Saving to CSV
+momentum_data_12m.to_csv(r'C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Factor_Analysis\momentum_data_12m.csv', index=False)
+momentum_data_6m.to_csv(r'C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Factor_Analysis\momentum_data_6m.csv', index=False)
+

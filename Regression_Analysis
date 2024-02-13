@@ -1,0 +1,170 @@
+import pandas as pd
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+
+## TODO: -Filter by Identifier (Does it make sense here? Data should already be filtered as factor returns data is the same for each identifier)
+
+# ======================== IMPORT DATA ========================
+
+output_data_file_path = r"C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Factor_Analysis\factor_long_short_returns.csv"
+output_data = pd.read_csv(output_data_file_path)
+
+momentum_data_6m_file_path = r"C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Factor_Analysis\momentum_data_6m.csv"
+momentum_data_6m = pd.read_csv(momentum_data_6m_file_path)
+
+momentum_data_12m_file_path = r"C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Factor_Analysis\momentum_data_12m.csv"
+momentum_data_12m = pd.read_csv(momentum_data_12m_file_path)
+
+# ======================== IMPORT FAMA FRENCH FACTOR ========================
+
+file_path = r"C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Fama_French_5Factor.csv"
+skiprows = 2  # Set the number of rows to skip at the start of the file
+delimiter = ','  # Set the correct delimiter, e.g., ',' for comma, '\t' for tab
+
+# Read the CSV with adjustments
+ff_5factors_data = pd.read_csv(file_path, skiprows=skiprows, delimiter=delimiter)
+
+# Truncate the DataFrame after row 724
+ff_5factors_data = ff_5factors_data.iloc[:725]
+
+ff_5factors_data['Date'] = pd.to_datetime(ff_5factors_data['Unnamed: 0'], format='%Y%m')
+ff_5factors_data = ff_5factors_data.drop(columns=['Unnamed: 0'])
+ff_5factors_data.set_index('Date', inplace=True)
+
+# ======================== COMBINE DATAFRAMES ========================
+
+# Convert 'public_date' to datetime and set as index
+output_data['Date'] = pd.to_datetime(output_data['public_date'])
+output_data.set_index('Date', inplace=True)
+output_data.drop(columns=['public_date'], inplace=True)
+
+momentum_data_12m['Date'] = pd.to_datetime(momentum_data_12m['public_date'])
+momentum_data_12m.set_index('Date', inplace=True)
+momentum_data_12m.drop(columns=['public_date'], inplace=True)
+
+momentum_data_6m['Date'] = pd.to_datetime(momentum_data_6m['public_date'])
+momentum_data_6m.set_index('Date', inplace=True)
+momentum_data_6m.drop(columns=['public_date'], inplace=True)
+
+# Merge Momentum and Factor Returns
+combined_data = pd.merge(output_data, momentum_data_6m, on=['Date', 'secid'], how='left')
+combined_data = pd.merge(combined_data, momentum_data_12m, on=['Date', 'secid'], how='left')
+
+# The data is dates as of the first month of the next month. So beginning of month to end of last month
+ff_5factors_data.index = ff_5factors_data.index + pd.offsets.MonthEnd(0)
+
+# Change values to numeric values
+for col in ff_5factors_data.columns:
+    ff_5factors_data[col] = pd.to_numeric(ff_5factors_data[col], errors='coerce')
+
+# Divide data by 100 to change from percentage to decimal
+ff_5factors_data = ff_5factors_data / 100
+
+# Merge with Fama-French Data
+final_combined_data = pd.merge(combined_data, ff_5factors_data, on='Date', how='left')
+
+# ======================== COMBINE DATAFRAMES WITH STRATEGY RETURNS ========================
+
+otm_range = (10, 15)
+months_to_expiry = 6
+
+# Load the identifiers_db data
+portfolio_file = rf'C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Monthly_Returns\Monthly_Returns_OTMrange_{otm_range[0]}-{otm_range[1]}_MonthsToExpiry_{months_to_expiry}.xlsx'
+portfolio_returns = pd.read_excel(portfolio_file)
+
+portfolio_returns['Date'] = pd.to_datetime(portfolio_returns['date'])
+portfolio_returns.set_index('Date', inplace=True)
+portfolio_returns.drop(columns=['date'], inplace=True)
+
+final_combined_data = pd.merge(final_combined_data, portfolio_returns, on='Date', how='left')
+
+# Drop first months because of momentum calculation
+specific_date = '1996-10-31'
+final_combined_data = final_combined_data[final_combined_data.index > specific_date]
+
+# Drop duplicates. But it keeps more than one identifier and in the other identifiers data there is a jump
+final_combined_data.reset_index(inplace=True)
+final_combined_data = final_combined_data.drop_duplicates(subset='Date')
+final_combined_data.set_index('Date', inplace=True)
+
+print(final_combined_data.columns)
+
+# ======================== PLOT DATA ========================
+
+#columns_to_exclude = ["secid", "momentum_6m_rank", "momentum_12m_rank", "momentum_6m_quantile", "momentum_12m_quantile"]
+columns_to_exclude = ["secid", "momentum_6m", "momentum_12m", "momentum_6m_rank", "momentum_12m_rank", "momentum_6m_quantile", "momentum_12m_quantile", "ls_bm", "net_cash_flow"]
+cumulative_columns = final_combined_data.columns.difference(columns_to_exclude)
+
+for col in cumulative_columns:
+    final_combined_data[col] = pd.to_numeric(final_combined_data[col], errors='coerce')
+    
+cumulative_returns = (1 + final_combined_data[cumulative_columns]).cumprod() - 1
+
+final_combined_data.to_csv(r'C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Factor_Analysis\final_combined_data.csv')
+cumulative_returns.to_csv(r'C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Factor_Analysis\cumulative_returns.csv')
+
+cumulative_returns.plot()
+plt.title('Cumulative Returns of Various Factors')
+plt.xlabel('Date')
+plt.ylabel('Cumulative Returns')
+plt.legend(loc='upper left')
+plt.show()
+
+# Plotting the data with a logarithmic scale
+plt.figure(figsize=(12, 6))
+for col in cumulative_columns:
+    plt.plot(cumulative_returns.index, cumulative_returns[col], label=col)
+
+plt.title('Cumulative Returns of Various Factors (Log Scale)')
+plt.xlabel('Date')
+plt.ylabel('Cumulative Returns')
+plt.yscale('log')  # Set the y-axis to a logarithmic scale
+plt.legend(loc='upper left')
+plt.show()
+
+# ======================== REGRESSION ========================
+
+def perform_regression(df, x_columns, y_column, rf_column_name):
+    """
+    Perform a linear regression using excess returns and return the summary.
+
+    Args:
+    df (DataFrame): The data frame containing the data in returns.
+    x_columns (list): The list of independent variable column names (returns).
+    y_column (str): The name of the dependent variable column (returns).
+    rf_column_name (str): The name of the risk-free rate column (returns).
+    
+    Returns:
+    The regression summary as a result object from the Statsmodels OLS regression.
+
+    Note:
+    This function calculates the excess return over the risk-free rate and performs
+    an OLS regression against the specified independent variables, which are expected
+    to be in the form of returns.
+    """
+
+    # Convert x_columns to a list if it's not already
+    if not isinstance(x_columns, list):
+        x_columns = [x_columns]
+
+    # Calculate the risk-free rate change and excess returns
+    df['RiskFreeRate'] = df[rf_column_name]
+    df['ExcessReturn'] = df[y_column] - df['RiskFreeRate']
+
+    # Drop any rows with NaN values to ensure a clean regression analysis
+    df_clean = df[['ExcessReturn'] + x_columns].dropna()
+
+    # Prepare the dependent variable (y) and the independent variables (x)
+    y = df_clean['ExcessReturn']
+    x = df_clean[x_columns]
+    x = sm.add_constant(x)  # Add a constant to the model for the intercept
+
+    # Perform the regression
+    result = sm.OLS(y, x).fit()
+
+    return result.summary()
+
+
+# Example call to the function
+print(perform_regression(final_combined_data, ['Mkt-RF', 'SMB', "HML", "RMW", "CMA", 'ls_bm', 'ls_roe', 'ls_mktcap', 'ls_pe_op_basic', 'ls_gpm', "momentum_6m", "momentum_12m"], "net_cash_flow", "RF"))
+

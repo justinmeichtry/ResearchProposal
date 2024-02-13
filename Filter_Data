@@ -1,0 +1,213 @@
+import pandas as pd
+from pandas.tseries.offsets import WeekOfMonth
+
+# ======================== THIRD FRIDAY OF THE MONTH ========================
+
+def get_third_fridays(start_date, end_date):
+    """ Generate a list of third Fridays within the given date range """
+    third_friday = WeekOfMonth(weekday=4, week=2)
+    all_third_fridays = pd.date_range(start=start_date, end=end_date, freq=third_friday)
+    return all_third_fridays
+
+def filter_data_by_identifiers(data, identifiers):
+    """Filter the DataFrame based on a list of identifiers."""
+    if not identifiers: 
+        return data
+    return data[data['secid'].isin(identifiers)]
+
+# Third Fridays variables
+start_date = '1996-01-01'
+end_date = '2025-12-31'
+third_fridays = get_third_fridays(start_date, end_date)
+
+# Control variables
+otm_range = (-2.5, 2.5)
+months_to_expiry = 6
+years = range(2019, 2024)
+
+stock_prices_file = r'C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Stock_Prices\combined_stock_prices_data.csv'
+stock_prices = pd.read_csv(stock_prices_file, usecols=['secid', 'date', 'close'])
+stock_prices['secid'] = stock_prices['secid'].astype(int).astype(str)
+stock_prices['date'] = pd.to_datetime(stock_prices['date'])
+
+identifiers = []  # Add identifiers here. Leave empty to use all identifiers.
+
+for year in years:
+    options_data_file = rf'C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Original_Call_Data\combined_options_data_{year}.csv'
+    options_data = pd.read_csv(options_data_file, usecols=['secid', 'date', 'exdate', 'cp_flag', 'strike_price', 'best_bid'])
+    options_data['secid'] = options_data['secid'].astype(int).astype(str) #Maybe keep it as integer to increase speed
+    options_data['date'] = pd.to_datetime(options_data['date'])
+    options_data['exdate'] = pd.to_datetime(options_data['exdate'])
+    
+    # Filter data by identifiers (if provided)
+    options_data = filter_data_by_identifiers(options_data, identifiers)
+    
+    # Clean data
+    options_data = options_data.drop(['cp_flag'], axis=1)
+           
+    # Adjust strike_price by dividing by 1000
+    options_data['strike_price_adj'] = options_data['strike_price'] / 1000
+    
+    # Adjusting the 'exdate' by subtracting one day for all dates before 2015-01-18
+    options_data.loc[options_data['exdate'] < pd.Timestamp('2015-01-18'), 'exdate'] = options_data['exdate'] - pd.Timedelta(days=1)
+    
+    # Create option_id using adjusted strike_price
+    options_data['option_id'] = options_data['secid'] + "_" + options_data['exdate'].astype(str) + "_" + options_data['strike_price_adj'].astype(int).astype(str)
+         
+    # ======================== ADD STOCK PRICES ========================
+    
+    # Get unique dates from 'date' and 'exdate' in options_data
+    unique_dates = pd.concat([options_data['date'], options_data['exdate']]).unique()
+    
+    # Filter stock_prices for the relevant dates
+    filtered_stock_prices = stock_prices[stock_prices['date'].isin(unique_dates)]
+    
+    print("Unique SECIDs in options_data:", options_data['secid'].nunique())
+    print("Unique dates in options_data:", options_data['date'].nunique())
+    print("Unique SECIDs in filtered_stock_prices:", filtered_stock_prices['secid'].nunique())
+    print("Unique dates in filtered_stock_prices:", filtered_stock_prices['date'].nunique())
+    
+    common_secids = set(options_data['secid']).intersection(set(filtered_stock_prices['secid']))
+    print(f"Number of common SECIDs: {len(common_secids)}")
+    if len(common_secids) == 0:
+        print("There are no common SECIDs between options_data and stock_prices.")
+        
+    # Example for checking more secids
+    #for secid in common_secids:
+     #   options_dates = set(options_data[options_data['secid'] == secid]['date'])
+      #  stock_dates = set(filtered_stock_prices[filtered_stock_prices['secid'] == secid]['date'])
+       # unmatched = options_dates.difference(stock_dates)
+        #if unmatched:
+         #   print(f"SECID {secid} has unmatched dates: {unmatched}")
+         
+    # First Merge - Add stock prices on 'date'
+    filtered_data = pd.merge(options_data, filtered_stock_prices, how='left', left_on=['date', 'secid'], right_on=['date', 'secid'])
+    filtered_data.rename(columns={'close': 'stock_price_on_date'}, inplace=True)
+    
+    # Use the filtered_data from the first merge here
+    filtered_data = pd.merge(filtered_data, filtered_stock_prices, how='left', left_on=['exdate', 'secid'], right_on=['date', 'secid'], suffixes=('', '_on_exdate'))
+    filtered_data.rename(columns={'close': 'stock_price_on_exdate'}, inplace=True)
+    
+    # Drop the extra 'date' column resulted from the second merge
+    filtered_data.drop(columns=['date_on_exdate'], inplace=True)
+        
+    print(f"Number of rows before stock_prices filtering: {len(filtered_data)}")
+    
+    # Filter to get rows with missing 'close' values
+    #missing_stock_prices = filtered_data[(filtered_data['stock_price_on_date'].isna()) | (filtered_data['stock_price_on_exdate'].isna())]
+    
+    # Save combined missing stock prices data to CSV
+    #missing_stock_prices_file_path = rf'C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Original_Call_Data\missing_close_data_{year}.csv'
+    #missing_stock_prices.to_csv(missing_stock_prices_file_path, index=False)
+    
+    # Drop rows with missing 'stock_price_on_date'
+    filtered_data.dropna(subset=['stock_price_on_date'], inplace=True)
+    
+    # Drop rows with missing 'stock_price_on_exdate'
+    filtered_data.dropna(subset=['stock_price_on_exdate'], inplace=True)
+    
+    print(f"Number of rows after stock_prices filtering: {len(filtered_data)}")
+    
+    # ======================== FILTER OTM ========================
+    
+    # Add a new column to 'merged_data' for the moneyness of each option
+    filtered_data['moneyness'] = (filtered_data['strike_price_adj'] - filtered_data['stock_price_on_date']) / filtered_data['stock_price_on_date'] * 100
+    
+    print(f"Number of rows before OTM filtering: {len(filtered_data)}") 
+      
+    # Filter for out-of-the-money options within the specified range
+    OTM_lower_bound, OTM_upper_bound = otm_range
+    filtered_data = filtered_data[
+        (filtered_data['moneyness'] > OTM_lower_bound) & (filtered_data['moneyness'] <= OTM_upper_bound)
+    ]
+    # Debug: Print the number of rows after OTM filtering
+    print(f"Number of rows after OTM filtering: {len(filtered_data)}")
+    
+    # ======================== FILTER THIRD FRIDAYS ========================
+        
+    # Convert 'third_fridays' to a set for efficient comparison
+    third_fridays_set = set(third_fridays)
+
+    # Convert the unique 'exdate' values to a set
+    unique_exdates_set = set(pd.Series(filtered_data['exdate'].unique()))
+
+    # Find common dates between 'third_fridays' and 'unique_exdates'
+    common_dates = third_fridays_set.intersection(unique_exdates_set)
+
+    # Find dates in 'unique_exdates' that are not in 'third_fridays'
+    exdates_not_third_fridays = unique_exdates_set.difference(third_fridays_set)
+
+    # Find dates in 'third_fridays' that are not in 'unique_exdates'
+    third_fridays_not_in_exdates = third_fridays_set.difference(unique_exdates_set)
+
+    # Print results or handle them as needed
+    print("Common dates:", common_dates)
+    print("Exdates not on third Fridays:", exdates_not_third_fridays)
+    #print("Third Fridays not in exdates:", third_fridays_not_in_exdates)
+    
+    # ======================== FILTER THIRD FRIDAYS ========================
+        
+    # Debug: Print the number of rows after OTM filtering
+    print(f"Number of rows before third_friday filtering: {len(filtered_data)}")
+    
+    # Convert 'third_fridays' into a dictionary mapping each date to the target expiration date
+    # based on 'months_to_expiry'
+    third_fridays_dict = {third_fridays[i]: third_fridays[min(i + months_to_expiry, len(third_fridays) - 1)] for i in range(len(third_fridays))}
+    
+    # Create a function to apply the mapping
+    def map_date_to_target_exdate(date):
+        return third_fridays_dict.get(date, None)
+    
+    # Map each 'date' to its corresponding target expiration date
+    filtered_data['target_exdate'] = filtered_data['date'].map(map_date_to_target_exdate)
+    
+    # Filter for rows where 'exdate' matches the calculated 'target_exdate'
+    filtered_data = filtered_data[filtered_data['exdate'] == filtered_data['target_exdate']]
+    
+    # Drop the 'target_exdate' column if not needed
+    filtered_data.drop(columns=['target_exdate'], inplace=True)
+    
+    print(f"Number of rows after third friday filtering: {len(filtered_data)}")
+    
+    print(f"Number of rows before option_id filtering: {len(filtered_data)}") 
+    
+    # Remove duplicates based on 'option_id'
+    filtered_data = filtered_data.drop_duplicates(subset='option_id')
+    
+    print(f"Number of rows before option_id filtering: {len(filtered_data)}")
+   
+    # ======================== CALCULATE NET CASH FLOWS ========================
+    
+    # Calculate the premium received (multiplied by 100 (assuming Option Contract Size is 100))
+    filtered_data['premium_received'] = filtered_data['best_bid'] * 100
+    
+    # Calculate the cost of buying the stock (multiplied by 100 (assuming Option Contract Size is 100))
+    filtered_data['cost_of_buying_stock'] = filtered_data['stock_price_on_date'] * 100
+    
+    # Calculate the cash flow from the call buyer when the option is exercised (multiplied by 100)
+    # This occurs only if the option is exercised
+    filtered_data['cash_from_option_exercise'] = filtered_data.apply(
+        lambda row: row['strike_price_adj'] * 100 if row['stock_price_on_exdate'] > row['strike_price_adj'] else 0,
+        axis=1
+    )
+    
+    # Calculate the revenue from selling the stock on expiry (multiplied by 100)
+    # This revenue is realized only if the option is not exercised
+    filtered_data['revenue_from_selling_stock'] = filtered_data.apply(
+        lambda row: row['stock_price_on_exdate'] * 100 if row['stock_price_on_exdate'] <= row['strike_price_adj'] else 0,
+        axis=1
+    )
+    
+    # Calculate the net cash flow for each option
+    filtered_data['net_cash_flow'] = filtered_data.apply(
+        lambda row: row['premium_received'] - row['cost_of_buying_stock'] + row['revenue_from_selling_stock'] if row['stock_price_on_exdate'] <= row['strike_price_adj']
+                    else row['premium_received'] - row['cost_of_buying_stock'] + row['cash_from_option_exercise'],
+        axis=1
+    )
+    
+    # Updating the filename to include control variables
+    filename = rf'C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Filtered_Call_Data\ATM\option_prices_filtered_{year}_OTMrange_{otm_range[0]}-{otm_range[1]}_MonthsToExpiry_{months_to_expiry}.csv'
+    
+    # Saving the DataFrame
+    print(year)
+    filtered_data.to_csv(filename)

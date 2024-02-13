@@ -1,0 +1,142 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+## TODO: Cash from Calls wird verzinst
+
+def read_and_filter_data(start_date, end_date, base_path, otm_range, months_to_expiry, identifiers=None):
+    all_data = pd.DataFrame()
+    start_year = start_date.year
+    end_year = end_date.year
+
+    for year in range(start_year, end_year + 1):
+        file_path = f"{base_path}/option_prices_filtered_{year}_OTMrange_{otm_range[0]}-{otm_range[1]}_MonthsToExpiry_{months_to_expiry}.csv"
+        yearly_data = pd.read_csv(file_path, parse_dates=['date'])
+
+        if identifiers:
+            yearly_data = yearly_data[yearly_data['secid'].isin(identifiers)]
+
+        all_data = pd.concat([all_data, yearly_data], ignore_index=True)
+
+    # Filter data based on the specified date range
+    all_data = all_data[(all_data['date'] >= start_date) & (all_data['date'] <= end_date)]
+    
+    # Extract unique identifiers
+    unique_identifiers = all_data['secid'].unique()
+    return all_data, unique_identifiers
+
+def analyze_options_data(data):
+    # Reset index if 'date' is set as index
+    if 'date' not in data.columns and 'date' in data.index.names:
+        data = data.reset_index()
+
+    # Ensure 'date' is a datetime object
+    data['date'] = pd.to_datetime(data['date'])
+    
+    # Extract year and month from date
+    data['year'] = data['date'].dt.year
+    data['month'] = data['date'].dt.month
+
+    # Counting options and calculating averages
+    options_count_per_year = data.groupby('year').size().reset_index(name='total_options_year')
+    average_options_per_year = options_count_per_year['total_options_year'].mean()
+
+    options_count_per_month_year = data.groupby(['year', 'month']).size().reset_index(name='total_options_month')
+    average_options_per_month = options_count_per_month_year['total_options_month'].mean()
+
+    options_count_per_company = data.groupby('secid').size().reset_index(name='total_options_company')
+    average_options_per_company = options_count_per_company['total_options_company'].mean()
+
+    options_count_per_company_year = data.groupby(['secid', 'year']).size().reset_index(name='total_options_company_year')
+    average_options_per_company_year = options_count_per_company_year['total_options_company_year'].mean()
+    
+    # Print or return the results
+    #print("Total Options Count Per Year:\n", options_count_per_year)
+    #print("\nAverage Options Per Year: {:.2f}".format(average_options_per_year))
+    #print("\nTotal Options Count Per Month and Year:\n", options_count_per_month_year)
+    #print("\nAverage Options Per Month: {:.2f}".format(average_options_per_month))
+    #print("\nTotal Options Count Per Company:\n", options_count_per_company)
+    #print("\nAverage Options Per Company: {:.2f}".format(average_options_per_company))
+    #print("\nTotal Options Count Per Company Per Year:\n", options_count_per_company_year)
+    #print("\nAverage Options Per Company Per Year: {:.2f}".format(average_options_per_company_year))
+
+def calculate_portfolio_metrics_and_save_to_excel(data, output_file):
+    data.set_index('date', inplace=True)
+
+    monthly_cash_flows = data['net_cash_flow'].resample('M').sum()
+    initial_investment = 100000
+    monthly_portfolio_values = monthly_cash_flows.cumsum() + initial_investment
+
+    plt.figure(figsize=(12, 6))
+    monthly_portfolio_values.plot()
+    plt.title("Monthly Portfolio Values")
+    plt.xlabel("Date")
+    plt.ylabel("Portfolio Value")
+    plt.grid(True)
+    plt.show()
+
+    monthly_returns = monthly_portfolio_values.pct_change().dropna()
+    annual_return = (1 + monthly_returns).prod() ** (12 / len(monthly_returns)) - 1
+    annualized_volatility = monthly_returns.std() * np.sqrt(12)
+    
+    # Alternative calculation using log returns
+    log_returns = np.log(1 + monthly_returns)
+    annual_log_return = np.exp(log_returns.mean() * 12) - 1
+    
+    # Calculate cumulative log returns
+    cumulative_log_returns = log_returns.cumsum()
+
+    # Plotting cumulative log returns
+    plt.figure(figsize=(12, 6))
+    cumulative_log_returns.plot()
+    plt.title("Cumulative Logarithmic Returns")
+    plt.xlabel("Date")
+    plt.ylabel("Cumulative Log Return")
+    plt.grid(True)
+    plt.show()
+        
+    if len(monthly_returns) == 0:
+        print("Error: No monthly returns data available.")
+        return
+    
+    if monthly_returns.isna().any():
+        print("Warning: NaN values present in monthly returns.")
+
+    monthly_max = monthly_portfolio_values.cummax()
+    monthly_drawdown = (monthly_portfolio_values - monthly_max) / monthly_max
+    biggest_monthly_drawdown = monthly_drawdown.min()
+
+    risk_free_rate = 0.01
+    sharpe_ratio = (annual_return - risk_free_rate) / annualized_volatility
+
+    print(f"Annual Return: {annual_return:.2f}")
+    print(f"Annualized Log Return: {annual_log_return:.2f}")
+    print(f"Annualized Volatility: {annualized_volatility:.2f}")
+    print(f"Biggest Monthly Drawdown: {biggest_monthly_drawdown:.2f}")
+    print(f"Sharpe Ratio: {sharpe_ratio:.2f}")
+
+    # Save monthly returns to Excel
+    unique_identifiers_df = pd.DataFrame(unique_identifiers, columns=['secid'])
+    with pd.ExcelWriter(output_file) as writer:
+        monthly_returns.to_excel(writer, sheet_name='Monthly Returns')
+        unique_identifiers_df.to_excel(writer, sheet_name='Unique Identifiers')
+
+# ======================== CALCULATE METRICS AND PLOT ========================
+
+otm_range = (-2.5, 2.5)
+months_to_expiry = 6
+start_date = pd.Timestamp('1996-01-01')
+end_date = pd.Timestamp('2023-12-31')
+identifiers = []  # Replace with your SECIDs or keep empty
+
+base_path = 'C:/Users/justi/Desktop/Masterarbeit/Options_Data/Data/Filtered_Call_Data/ATM'
+output_file = rf'C:\Users\justi\Desktop\Masterarbeit\Options_Data\Data\Monthly_Returns\Monthly_Returns_OTMrange_{otm_range[0]}-{otm_range[1]}_MonthsToExpiry_{months_to_expiry}.xlsx'
+
+data, unique_identifiers = read_and_filter_data(start_date, end_date, base_path, otm_range, months_to_expiry)
+
+# Call the function with both data and unique identifiers
+calculate_portfolio_metrics_and_save_to_excel(data, output_file)
+
+# Perform additional analysis on options data
+options_analysis = analyze_options_data(data)
+
